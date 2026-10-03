@@ -53,7 +53,7 @@ Failure modes the spec implies but no single task's happy path exercises. Each i
   - `class StoreError(Exception)`, `class StoreCorrupt(StoreError)`, `class ReadOnlyStore(StoreError)`
   - `@dataclass(frozen=True) class Entry` with fields `name: str`, `command: str`, `hf_repo: str | None`, `created: str`, `updated: str`
   - `resolve_store_path(cli_path: str | None = None, env: Mapping[str, str] | None = None) -> Path`
-  - `class Store` with `Store.open(path: Path) -> Store`, `entries(self) -> list[Entry]`, `readonly: bool`, and internal `_save(self) -> None`
+  - `class Store` with `Store.open(path: Path) -> Store`, `entries(self) -> list[Entry]`, `put(self, entry: Entry) -> None`, `readonly: bool`, and internal `_save(self) -> None`
   - `utcnow() -> str` returning ISO 8601 UTC with `Z` suffix, seconds precision
 
 - [ ] **Step 1: Create the package skeleton**
@@ -115,7 +115,7 @@ Stage `pyproject.toml src/locker/__init__.py src/locker/store.py tests/__init__.
   - `update(self, name: str, command: str | None = None, hf_repo: str | None = None) -> Entry`
   - `remove(self, name: str) -> None`
 
-Every mutator calls `_save()` before returning, so a caller cannot forget to persist.
+`add` and `update` build an `Entry` (setting `created`/`updated` via `utcnow()`) and hand it to `put()` from Task 1, which owns `_save()`. Every mutator therefore persists before returning, so a caller cannot forget to.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -132,7 +132,7 @@ Add these to `tests/test_store.py`:
 - `test_resolve_missing_raises_notfound`
 - `test_suggestions` — with `qwen3.8` stored, `suggestions("qwen38")` contains `qwen3.8`; unrelated input suggests nothing.
 - `test_update_changes_command_and_updated_stamp` — `created` unchanged, `updated` changes, `command` replaced.
-- `test_update_rejects_empty_command` — `update("x", command="")` raises `ValueError` and leaves the stored entry untouched.
+- `test_update_rejects_empty_command` — `update("x", command="")` raises `InvalidCommand` (a `StoreError`, so the CLI reports it cleanly instead of tracing back) and leaves the stored entry untouched.
 - `test_remove` — removes; a second `remove` raises `NotFound`.
 - `test_mutators_persist_immediately` — after `add`, a fresh `Store.open` on the same path sees the entry without any explicit save.
 
