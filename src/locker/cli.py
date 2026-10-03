@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from typing import Callable, NoReturn
 
-from .store import Entry, Store, StoreError, resolve_store_path
+from .store import Entry, NotFound, Store, StoreError, resolve_store_path
 
 COMMAND_WIDTH = 60
 
@@ -117,8 +119,40 @@ def cmd_list(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_launch(
+    store: Store,
+    name: str,
+    exec_fn: Callable[[str, list[str]], NoReturn] = os.execvp,
+) -> int:
+    """Replace this process with the stored command.
+
+    ``execvp`` rather than a subprocess, so Ctrl-C, signals, and stdio belong to
+    the model process outright with no wrapper lingering in between. The command
+    goes through ``sh -c`` because pasted launch commands contain env
+    assignments, ``cd &&``, and pipes. ``exec_fn`` is injectable so tests never
+    replace a process.
+    """
+    try:
+        entry = store.resolve(name)
+    except NotFound:
+        print(f"locker: no locker named {name!r}", file=sys.stderr)
+        for guess in store.suggestions(name):
+            print(f"  did you mean: {guess}", file=sys.stderr)
+        return 1
+
+    # stderr, so a pipe on stdout stays clean.
+    print(f"→ running: {entry.command}", file=sys.stderr)
+    exec_fn("/bin/sh", ["sh", "-c", entry.command])
+    return 0
+
+
+def _run_launch(store: Store, args: argparse.Namespace) -> int:
+    return cmd_launch(store, args.name)
+
+
 COMMANDS = {
     "list": cmd_list,
+    "launch": _run_launch,
 }
 
 

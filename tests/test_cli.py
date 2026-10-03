@@ -1,4 +1,4 @@
-"""Tests for the locker CLI: argument parsing, list output, and exit codes."""
+"""Tests for the locker CLI: parsing, list output, launch, and exit codes."""
 
 import contextlib
 import io
@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from locker.cli import main
+from locker.cli import cmd_launch, main
 from locker.store import Store
 
 
@@ -128,6 +128,68 @@ class ListTests(CliTestCase):
         self.assertIn(str(self.path), err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(out, "")
+
+
+class LaunchTests(CliTestCase):
+    def test_launch_execs_sh_c_with_exact_command(self):
+        command = "export FOO=\"a\" && echo $HOME 'x'\nllama-server --port 8080"
+        self.seed(("x", command))
+        stub = mock.Mock()
+
+        store = Store.open(self.path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = cmd_launch(store, "x", exec_fn=stub)
+
+        self.assertEqual(code, 0)
+        stub.assert_called_once_with("/bin/sh", ["sh", "-c", command])
+        self.assertEqual(store.get("x").command, command)
+
+    def test_launch_banner_goes_to_stderr(self):
+        self.seed(("x", "echo hi"))
+        stub = mock.Mock()
+        out, err = io.StringIO(), io.StringIO()
+
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            cmd_launch(Store.open(self.path), "x", exec_fn=stub)
+
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("→ running: echo hi", err.getvalue())
+
+    def test_launch_missing_name_exits_one_with_suggestions(self):
+        self.seed(("qwen3.8", "cmd"))
+        stub = mock.Mock()
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = cmd_launch(Store.open(self.path), "qwen38", exec_fn=stub)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stub.call_count, 0)
+
+        code, out, err = self.run_cli(["launch", "qwen38"])
+        self.assertEqual(code, 1)
+        self.assertIn("qwen3.8", err)
+        self.assertIn("did you mean", err)
+
+    def test_launch_resolves_case_insensitively(self):
+        self.seed(("qwen3.8", "echo hi"))
+        stub = mock.Mock()
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = cmd_launch(Store.open(self.path), "QWEN3.8", exec_fn=stub)
+
+        self.assertEqual(code, 0)
+        stub.assert_called_once_with("/bin/sh", ["sh", "-c", "echo hi"])
+
+    def test_launch_does_not_touch_the_network(self):
+        self.seed(("x", "echo hi"))
+        stub = mock.Mock()
+
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            with contextlib.redirect_stderr(io.StringIO()):
+                cmd_launch(Store.open(self.path), "x", exec_fn=stub)
+
+        self.assertEqual(stub.call_count, 1)
+        self.assertEqual(urlopen.call_count, 0)
 
 
 if __name__ == "__main__":
