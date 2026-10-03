@@ -29,15 +29,33 @@ Python 3.11 or newer. Nothing else — the standard library covers all of it.
 
 ## Install
 
-```console
-$ uv tool install .          # or: pipx install .
-```
-
-Run once without installing:
+With [uv](https://docs.astral.sh/uv/):
 
 ```console
-$ uvx --from . locker list
+$ uv tool install git+https://github.com/craigmcgrain-spec/Launch-Locker.git
 ```
+
+Over SSH instead, if you have a key on GitHub:
+
+```console
+$ uv tool install git+ssh://git@github.com/craigmcgrain-spec/Launch-Locker.git
+```
+
+With pipx, or from a clone:
+
+```console
+$ pipx install git+https://github.com/craigmcgrain-spec/Launch-Locker.git
+$ git clone git@github.com:craigmcgrain-spec/Launch-Locker.git
+$ cd Launch-Locker && uv tool install .
+```
+
+Run it once without installing anything:
+
+```console
+$ uvx --from git+https://github.com/craigmcgrain-spec/Launch-Locker.git locker list
+```
+
+That leaves a `locker` command on your PATH. Undo with `uv tool uninstall launch-locker`.
 
 ## CLI
 
