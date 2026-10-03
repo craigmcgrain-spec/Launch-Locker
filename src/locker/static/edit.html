@@ -3,21 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Edit {{name}} — Launch Locker</title>
+<title>Edit {{name}} · Launch Locker</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>Edit {{name}}</h1>
-  <span class="addr"><a href="/">back to lockers</a></span>
-</header>
-<section class="section">
-  <form method="post" action="/lockers/{{quoted}}">
-    <label>name<input value="{{name}}" disabled></label>
-    <label>command<textarea name="command" required>{{command}}</textarea></label>
-    <label>hf repo — optional, detected from the command when blank<input name="hf_repo" value="{{hf_repo}}" autocomplete="off"></label>
-    <button type="submit">save</button>
-  </form>
-</section>
+<div class="shell">
+  <header class="masthead">
+    <div>
+      <h1>Edit locker</h1>
+      <p class="tagline"><code>{{name}}</code></p>
+    </div>
+    <p class="store"><a class="btn" href="/">Back to lockers</a></p>
+  </header>
+
+  <main class="single">
+    <form class="panel form-panel" method="post" action="/lockers/{{quoted}}">
+      <div class="field">
+        <span class="field-label">Name</span>
+        <p class="readonly-value"><code>{{name}}</code></p>
+        <p class="field-note">Names cannot be changed. Delete this locker and add it again to rename it.</p>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Command</span>
+        <textarea name="command" required rows="4">{{command}}</textarea>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Hugging Face repo <span class="field-note">optional</span></span>
+        <input name="hf_repo" value="{{hf_repo}}" autocomplete="off" placeholder="detected from the command">
+      </label>
+
+      <div class="form-actions">
+        <button class="btn primary" type="submit">Save changes</button>
+        <a class="btn" href="/">Cancel</a>
+      </div>
+    </form>
+  </main>
+</div>
 </body>
 </html>

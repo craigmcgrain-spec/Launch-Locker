@@ -419,6 +419,19 @@ class CardApiTests(ServerTestCase):
 
         self.assertEqual(stub.calls, [], "a hostile repo must never be fetched")
 
+    def test_api_card_trims_tags(self):
+        api = {"tags": ["license:mit"] + [f"tag-{i}" for i in range(20)], "downloads": 1}
+        server = self.start_with(
+            StubCardClient(card=Card(repo="A/B", api=api, readme="", fetched_at=0.0))
+        )
+
+        status, body, _ = self.request(server, "GET", "/api/card?repo=A/B")
+
+        data = json.loads(body)
+        self.assertEqual(data["license"], "mit")
+        self.assertNotIn("license:mit", data["tags"], "license already shows separately")
+        self.assertLessEqual(len(data["tags"]), 8)
+
     def test_api_card_refresh_parameter_bypasses_cache(self):
         seen = {}
 

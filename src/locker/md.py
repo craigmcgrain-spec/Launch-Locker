@@ -76,6 +76,52 @@ def _inline(text: str) -> str:
     return text
 
 
+_FRONTMATTER_SCAN_LINES = 60
+_TAG_ONLY_LINE = re.compile(r"^[ \t]*(?:<[^>]+>[ \t]*)+$")
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block.
+
+    Model cards open with one, and its keys repeat the metadata the card header
+    already shows. Bounded on purpose: if no closing ``---`` turns up within
+    ``_FRONTMATTER_SCAN_LINES`` lines then this is not frontmatter, so a document
+    that merely starts with a horizontal rule is left alone rather than having
+    everything up to the next rule deleted.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return text
+
+    for index in range(1, min(len(lines), _FRONTMATTER_SCAN_LINES)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1 :])
+
+    return text
+
+
+def _drop_markup_only_lines(lines: list[str]) -> list[str]:
+    """Remove lines that are nothing but HTML tags, outside code fences.
+
+    A badge block is pure markup with nothing to read, and showing it as escaped
+    source puts a wall of tag soup at the top of most cards. Inside a fence the
+    same line is code, and is kept verbatim.
+    """
+    kept: list[str] = []
+    in_fence = False
+
+    for line in lines:
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            kept.append(line)
+            continue
+        if not in_fence and _TAG_ONLY_LINE.match(line):
+            continue
+        kept.append(line)
+
+    return kept
+
+
 def render(text: str) -> str:
     """Render markdown to HTML that is safe to insert into a page.
 
@@ -85,7 +131,10 @@ def render(text: str) -> str:
     if not text:
         return ""
 
-    escaped = html.escape(text[:MAX_README_CHARS], quote=True)
+    text = _strip_frontmatter(text[:MAX_README_CHARS])
+    escaped = html.escape(
+        "\n".join(_drop_markup_only_lines(text.split("\n"))), quote=True
+    )
     lines = escaped.split("\n")
     out: list[str] = []
     index = 0

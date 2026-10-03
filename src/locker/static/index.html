@@ -7,38 +7,76 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>Launch Locker</h1>
-  <span class="addr">127.0.0.1</span>
-</header>
-<main>
-  <section>
-    <h2>Lockers</h2>
-    {{lockers}}
-  </section>
-  <aside class="card" id="card-panel" data-selected="{{selected}}">
-    <h2>Model card</h2>
-    <p class="hint">No model card loaded yet.</p>
-  </aside>
-</main>
-<section class="section">
-  <h2>Add a locker</h2>
-  <form method="post" action="/lockers">
-    <label>name<input name="name" required autocomplete="off"></label>
-    <label>command<textarea name="command" required placeholder="llama-server -hf Qwen/Qwen3-8B --port 8080"></textarea></label>
-    <p class="hint" id="repo-hint"></p>
-    <label>hf repo — optional, detected from the command when blank<input name="hf_repo" autocomplete="off"></label>
-    <button type="submit">save</button>
-  </form>
-</section>
+<div class="shell">
+  <header class="masthead">
+    <div>
+      <h1>Launch Locker</h1>
+      <p class="tagline">Your model launch commands, stored by name.</p>
+    </div>
+    <p class="store" title="{{store_path}}">
+      <span class="store-label">Locker file</span>
+      <code>{{store_path}}</code>
+    </p>
+  </header>
+
+  <main class="{{main_class}}">
+    <section>
+      <details class="add" {{add_open}}>
+        <summary>Add a locker</summary>
+        <form class="add-form" method="post" action="/lockers">
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Name</span>
+              <input name="name" required autocomplete="off" placeholder="qwen3.8">
+            </label>
+            <label class="field">
+              <span class="field-label">Hugging Face repo <span class="field-note">optional</span></span>
+              <input name="hf_repo" autocomplete="off" placeholder="detected from the command">
+            </label>
+          </div>
+          <label class="field">
+            <span class="field-label">Command</span>
+            <textarea name="command" required rows="3" placeholder="llama-server -hf Qwen/Qwen3-8B --ctx-size 8192 --port 8080"></textarea>
+          </label>
+          <p class="field-note" id="repo-hint" role="status"></p>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Save locker</button>
+            <span class="field-note">Runs with <code>locker launch &lt;name&gt;</code>.</span>
+          </div>
+        </form>
+      </details>
+
+      <div class="section-label">Lockers <span class="count">{{count}}</span></div>
+      {{lockers}}
+    </section>
+
+    <aside class="card panel" id="card-panel" data-selected="{{selected}}" aria-busy="false" {{card_hidden}}>
+      <div class="card-head">
+        <h2>Model card</h2>
+        <span class="chip" id="card-source"></span>
+      </div>
+      <div class="card-body" id="card-body">
+        <p class="field-note">Select a locker to see the model card of the model it launches.</p>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<p class="sr-only" id="toast" role="status" aria-live="polite"></p>
+
 <script>
 (function () {
   var panel = document.getElementById('card-panel');
-  // The hint lives in the form, not in the panel: loadCard replaces the panel's
-  // innerHTML, which would detach a hint element nested inside it.
+  var content = document.getElementById('card-body');
+  var source = document.getElementById('card-source');
+  var toast = document.getElementById('toast');
+  // The hint lives in the form, not in the card: render() replaces the card
+  // body, which would detach a hint element nested inside it.
   var hint = document.getElementById('repo-hint');
   var selected = panel.dataset.selected || '';
   var rows = Array.prototype.slice.call(document.querySelectorAll('tr.locker'));
+  var reduceMotion = window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function esc(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) {
@@ -46,8 +84,100 @@
     });
   }
 
-  function render(title, meta, extra) {
-    panel.innerHTML = '<h2>Model card</h2>' + title + (meta || '') + (extra || '');
+  function compact(value) {
+    if (typeof value !== 'number') { return ''; }
+    return new Intl.NumberFormat(undefined, {
+      notation: 'compact', maximumFractionDigits: 1
+    }).format(value);
+  }
+
+  function timeAgo(value) {
+    var then = Date.parse(value);
+    if (isNaN(then)) { return ''; }
+    var seconds = Math.round((Date.now() - then) / 1000);
+    var units = [['year', 31536000], ['month', 2592000], ['week', 604800],
+                 ['day', 86400], ['hour', 3600], ['minute', 60]];
+    for (var i = 0; i < units.length; i++) {
+      var n = Math.floor(seconds / units[i][1]);
+      if (n >= 1) { return n + ' ' + units[i][0] + (n > 1 ? 's' : '') + ' ago'; }
+    }
+    return 'just now';
+  }
+
+  // One authored entrance for card content, and it starts visible: only offset
+  // and focus animate, so nothing depends on an animation completing before it
+  // can be read. Everything else in this file is state, not motion.
+  function render(html) {
+    content.innerHTML = html;
+    if (!reduceMotion && content.animate) {
+      content.animate(
+        [{ transform: 'translateY(6px)', filter: 'blur(3px)' },
+         { transform: 'none', filter: 'blur(0)' }],
+        { duration: 300, easing: 'cubic-bezier(.16,1,.3,1)' }
+      );
+    }
+  }
+
+  function showError(data, row, pinned) {
+    var repo = data.repo || pinned || '';
+    var recovery = {
+      no_candidate: 'Set the repo on this locker to see its card.',
+      repo_not_found: 'That repo does not exist publicly. Correct it on this locker.',
+      unavailable: 'Hugging Face could not be reached. The card will load again when it can.'
+    }[data.error] || '';
+    var editLink = row && row.querySelector ? row.querySelector('a[href$="/edit"]') : null;
+    var fix = editLink
+      ? ' <a href="' + editLink.getAttribute('href') + '">Edit this locker</a>'
+      : '';
+    var open = repo
+      ? '<p class="card-note"><a href="https://huggingface.co/' + esc(repo)
+        + '" target="_blank" rel="noreferrer noopener">Open ' + esc(repo)
+        + ' on Hugging Face</a></p>'
+      : '';
+
+    if (source) { source.textContent = ''; }
+    render(
+      '<div class="card-error">'
+      + (repo ? '<p class="card-repo">' + esc(repo) + '</p>' : '')
+      + '<p class="card-note">' + esc(data.message) + '</p>'
+      + (recovery ? '<p class="card-note">' + esc(recovery) + fix + '</p>' : '')
+      + open
+      + '</div>'
+    );
+  }
+
+  function showCard(data) {
+    var parts = [];
+    if (data.pipeline_tag) { parts.push('<span>' + esc(data.pipeline_tag) + '</span>'); }
+    if (typeof data.downloads === 'number') {
+      parts.push('<span><b>' + compact(data.downloads) + '</b> downloads</span>');
+    }
+    if (typeof data.likes === 'number') {
+      parts.push('<span><b>' + compact(data.likes) + '</b> likes</span>');
+    }
+    if (data.license) { parts.push('<span>' + esc(data.license) + '</span>'); }
+    if (data.last_modified) {
+      parts.push('<span>updated ' + esc(timeAgo(data.last_modified)) + '</span>');
+    }
+
+    var tags = (data.tags || []).map(function (tag) {
+      return '<li>' + esc(tag) + '</li>';
+    }).join('');
+
+    if (source) { source.textContent = data.cached ? 'cached' : ''; }
+
+    // readme_html is generated by locker.md, which escapes the whole document
+    // before adding any markup of its own.
+    render(
+      '<p class="card-repo"><a href="https://huggingface.co/' + esc(data.repo)
+        + '" target="_blank" rel="noreferrer noopener">' + esc(data.repo) + '</a></p>'
+      + '<p class="card-meta">'
+        + parts.join('<span class="sep" aria-hidden="true"></span>') + '</p>'
+      + (tags ? '<ul class="card-tags">' + tags + '</ul>' : '')
+      + '<div class="card-readme">'
+        + (data.readme_html || '<p class="card-note">This model card has no README.</p>')
+      + '</div>'
+    );
   }
 
   function loadCard(row) {
@@ -58,44 +188,20 @@
     if (pinned) { params.set('repo', pinned); }
     if (row.dataset.command) { params.set('command', row.dataset.command); }
 
-    render('<p class="card-title">' + esc(pinned || row.dataset.name) + '</p>',
-           '<p class="hint">Loading model card…</p>');
+    panel.setAttribute('aria-busy', 'true');
+    if (source) { source.textContent = ''; }
+    render('<div class="skeleton"><span></span><span></span><span></span><span></span></div>');
 
     fetch('/api/card?' + params.toString())
       .then(function (response) { return response.json(); })
       .then(function (data) {
-        if (data.error) {
-          render('<p class="card-title">' + esc(data.repo || pinned || 'Model card') + '</p>',
-                 '<p class="hint">' + esc(data.message) + '</p>');
-          return;
-        }
-
-        var meta = [
-          data.author,
-          data.pipeline_tag,
-          '↓ ' + (data.downloads || 0).toLocaleString(),
-          '♥ ' + (data.likes || 0),
-          data.license,
-          data.last_modified ? 'updated ' + String(data.last_modified).slice(0, 10) : ''
-        ].filter(Boolean).map(esc).join(' · ');
-
-        var tags = (data.tags || []).map(function (tag) {
-          return '<li>' + esc(tag) + '</li>';
-        }).join('');
-
-        // readme_html is generated by locker.md, which escapes the whole
-        // document before adding any markup of its own.
-        render(
-          '<p class="card-title">' + esc(data.repo) +
-            (data.cached ? ' <span class="hint">(cached)</span>' : '') + '</p>',
-          '<p class="card-meta">' + meta + '</p>' +
-            (tags ? '<ul class="card-tags">' + tags + '</ul>' : ''),
-          '<div class="card-readme">' + (data.readme_html || '<p class="hint">No README.</p>') + '</div>'
-        );
+        panel.setAttribute('aria-busy', 'false');
+        if (data.error) { showError(data, row, pinned); } else { showCard(data); }
       })
       .catch(function () {
-        render('<p class="card-title">' + esc(pinned || 'Model card') + '</p>',
-               '<p class="hint">Could not load the model card (offline?).</p>');
+        panel.setAttribute('aria-busy', 'false');
+        render('<p class="card-repo">' + esc(pinned || 'Model card') + '</p>'
+          + '<p class="card-note">Could not reach the locker server. Reload the page to retry.</p>');
       });
   }
 
@@ -119,8 +225,15 @@
     button.addEventListener('click', function () {
       var label = button.textContent;
       copyText(button.dataset.command || '', function () {
-        button.textContent = 'copied';
-        setTimeout(function () { button.textContent = label; }, 1200);
+        var row = button.closest ? button.closest('tr.locker') : null;
+        var name = row && row.dataset.name ? row.dataset.name : 'this locker';
+        button.textContent = 'Copied';
+        button.classList.add('done');
+        if (toast) { toast.textContent = 'Copied the command for ' + name; }
+        setTimeout(function () {
+          button.textContent = label;
+          button.classList.remove('done');
+        }, 1400);
       });
     });
   });
@@ -138,11 +251,12 @@
   if (commandField) {
     commandField.addEventListener('input', function () {
       var match = commandField.value.match(/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+/);
-      hint.textContent = match ? 'detected repo: ' + match[0] : '';
+      hint.textContent = match ? 'Detected repo: ' + match[0] : '';
     });
   }
 
-  var active = rows.filter(function (row) { return row.dataset.name === selected; })[0] || rows[0];
+  var active = rows.filter(function (row) { return row.dataset.name === selected; })[0]
+    || rows[0];
   if (active) { active.classList.add('selected'); }
   loadCard(active);
 })();

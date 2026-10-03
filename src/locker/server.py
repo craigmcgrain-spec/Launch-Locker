@@ -105,23 +105,48 @@ def _fill(template: str, values: dict[str, str]) -> str:
 
 def _locker_row(entry: Entry) -> str:
     quoted = quote(entry.name, safe="")
+    # quote=True for anything going into an attribute, plain escape for text.
+    name = escape(entry.name)
+    attr = escape(entry.name, quote=True)
+    repo = entry.hf_repo or ""
+    command_attr = escape(entry.command, quote=True)
+
+    if repo:
+        under = (
+            '<span class="repo-line"><span class="repo-chip" '
+            f'title="{escape(repo, quote=True)}">{escape(repo)}</span></span>'
+        )
+    else:
+        under = (
+            '<span class="repo-line"><span class="repo-chip muted" '
+            'title="Detected from the command at launch time">auto</span></span>'
+        )
+
     return (
-        f'<tr class="locker" data-name="{escape(entry.name, quote=True)}" '
-        f'data-hf="{escape(entry.hf_repo or "", quote=True)}">'
-        f'<td class="name"><a href="/?selected={quoted}">{escape(entry.name)}</a></td>'
-        f'<td class="command"><code>{escape(entry.command)}</code></td>'
-        f'<td class="repo">{escape(entry.hf_repo or "")}</td>'
-        f'<td class="actions">'
-        f'<button type="button" class="copy" '
-        f'data-command="{escape(entry.command, quote=True)}">copy</button> '
-        f'<a href="/lockers/{quoted}/edit">edit</a> '
-        f'<form method="post" action="/lockers/{quoted}/delete" class="inline">'
-        f'<button type="submit">delete</button></form>'
+        f'<tr class="locker" data-name="{attr}" data-hf="{escape(repo, quote=True)}">'
+        f'<td class="cell-name"><a class="pick" href="/?selected={quoted}">{name}</a>'
+        f"{under}</td>"
+        f'<td class="cell-command">'
+        f'<code title="{command_attr}">{escape(entry.command)}</code></td>'
+        f'<td class="cell-actions">'
+        f'<button type="button" class="copy" data-command="{command_attr}" '
+        f'aria-label="Copy the command for {attr}">Copy</button>'
+        f'<a class="btn quiet" href="/lockers/{quoted}/edit" '
+        f'aria-label="Edit {attr}">Edit</a>'
+        f'<form class="inline" method="post" action="/lockers/{quoted}/delete">'
+        f'<button type="submit" class="btn quiet danger" '
+        f'aria-label="Delete {attr}">Delete</button>'
+        f"</form>"
         f"</td></tr>"
     )
 
 
-def render_page(entries: list[Entry], *, selected: str | None = None) -> str:
+def render_page(
+    entries: list[Entry],
+    *,
+    selected: str | None = None,
+    store_path: str | None = None,
+) -> str:
     """Render the locker list. Everything interpolated is HTML-escaped."""
     if selected is None and entries:
         selected = entries[0].name
@@ -129,15 +154,37 @@ def render_page(entries: list[Entry], *, selected: str | None = None) -> str:
     if entries:
         rows = "".join(_locker_row(entry) for entry in entries)
         lockers = (
-            "<table><thead><tr><th>Name</th><th>Command</th><th>Repo</th>"
-            f"<th></th></tr></thead><tbody>{rows}</tbody></table>"
+            '<div class="panel list">'
+            "<table><thead><tr>"
+            '<th scope="col" class="col-name">Name</th>'
+            '<th scope="col">Command</th>'
+            '<th scope="col"><span class="sr-only">Actions</span></th>'
+            f"</tr></thead><tbody>{rows}</tbody></table></div>"
         )
     else:
-        lockers = '<p class="empty">No lockers yet. Add one below.</p>'
+        lockers = (
+            '<div class="panel list"><div class="empty-state">'
+            '<p class="empty-title">No lockers yet</p>'
+            '<p class="empty-copy">Paste the command you use to launch a model, give it a '
+            "name, and it is ready to run by name from your terminal.</p>"
+            '<code class="empty-cmd">locker add qwen3.8 -c '
+            '"llama-server -hf Qwen/Qwen3-8B"</code>'
+            "</div></div>"
+        )
 
     return _fill(
         _template("index.html"),
-        {"lockers": lockers, "selected": escape(selected or "", quote=True)},
+        {
+            "lockers": lockers,
+            "selected": escape(selected or "", quote=True),
+            "store_path": escape(store_path or "", quote=True),
+            "count": str(len(entries)),
+            # The form is the only action on an empty page, so open it there, and
+            # the card column would otherwise sit empty beside a narrow list.
+            "add_open": "" if entries else "open",
+            "card_hidden": "" if entries else "hidden",
+            "main_class": "" if entries else "no-card",
+        },
     )
 
 
@@ -156,10 +203,13 @@ def render_edit_page(entry: Entry) -> str:
 def _summarize(card: Card, from_cache: bool) -> dict:
     """Shape a Card for the panel, deriving what the card view needs."""
     api = card.api
-    tags = [tag for tag in (api.get("tags") or []) if isinstance(tag, str)]
+    all_tags = [tag for tag in (api.get("tags") or []) if isinstance(tag, str)]
     license_name = next(
-        (tag.split(":", 1)[1] for tag in tags if tag.startswith("license:")), None
+        (tag.split(":", 1)[1] for tag in all_tags if tag.startswith("license:")), None
     )
+    # The license already sits beside the repo, and a wall of twenty chips buries
+    # the few worth reading.
+    tags = [tag for tag in all_tags if not tag.startswith("license:")][:8]
     downloads = api.get("downloads")
     likes = api.get("likes")
 
@@ -171,7 +221,7 @@ def _summarize(card: Card, from_cache: bool) -> dict:
         "likes": likes if isinstance(likes, int) else 0,
         "license": license_name,
         "last_modified": api.get("lastModified"),
-        "tags": tags[:20],
+        "tags": tags,
         "cached": from_cache,
         "readme_html": render(card.readme),
     }
@@ -253,7 +303,14 @@ class LockerHandler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         selected = (query.get("selected") or [""])[-1] or None
         entries = Store.open(self.server.store_path).entries()
-        self._send_html(200, render_page(entries, selected=selected))
+        self._send_html(
+            200,
+            render_page(
+                entries,
+                selected=selected,
+                store_path=str(self.server.store_path),
+            ),
+        )
 
     def _do_static(self, match) -> None:
         name = unquote(match.group("file"))
