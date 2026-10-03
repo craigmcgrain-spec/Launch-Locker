@@ -70,6 +70,10 @@ code {
 .actions { white-space: nowrap; }
 form.inline { display: inline; }
 
+tr.locker { cursor: pointer; }
+tr.locker.selected td { background: var(--panel); }
+td.name a { color: inherit; }
+
 button, .actions a {
   font: inherit;
   font-size: 12px;

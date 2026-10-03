@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -172,19 +173,35 @@ def cmd_add(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
-def _edit_in_editor(current: str) -> str:
+def _edit_in_editor(current: str) -> str | None:
     """Open the command in ``$EDITOR`` and return what was saved.
 
     ``subprocess`` is used here for the editor only. It never executes a stored
     command, so the rule that only ``cmd_launch`` executes anything still holds.
+
+    ``$EDITOR`` is split like a shell word, because the documented forms carry
+    arguments (``code -w``). Returns None when the editor cannot be started,
+    having reported why, so the caller can exit cleanly instead of tracing back.
     """
     editor = os.environ.get("EDITOR") or "vi"
+    try:
+        argv = shlex.split(editor)
+    except ValueError:
+        argv = [editor]
+    if not argv:
+        argv = ["vi"]
 
     fd, path = tempfile.mkstemp(prefix="locker-", suffix=".cmd")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(current)
-        subprocess.call([editor, path])
+
+        try:
+            subprocess.call([*argv, path])
+        except OSError as exc:
+            print(f"locker: cannot run editor {argv[0]!r}: {exc}", file=sys.stderr)
+            return None
+
         with open(path, encoding="utf-8") as handle:
             return handle.read().strip()
     finally:
@@ -200,6 +217,8 @@ def cmd_edit(store: Store, args: argparse.Namespace) -> int:
     command = args.command
     if command is None and args.hf_repo is None:
         command = _edit_in_editor(entry.command)
+        if command is None:
+            return 1
 
     # No change means no write: an untouched editor must not churn `updated` or
     # rewrite the file.

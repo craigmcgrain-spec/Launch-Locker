@@ -249,6 +249,17 @@ class AddTests(CliTestCase):
         self.assertIn("cannot begin with", err)
         self.assertEqual(Store.open(self.path).entries(), [])
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_unwritable_store_reports_cleanly(self):
+        self.dir.chmod(0o500)
+        self.addCleanup(self.dir.chmod, 0o700)
+
+        code, out, err = self.run_cli(["add", "x", "-c", "echo hi"])
+
+        self.assertEqual(code, 1)
+        self.assertIn(str(self.path), err)
+        self.assertNotIn("Traceback", err)
+
 
 class EditTests(CliTestCase):
     def test_edit_replaces_command(self):
@@ -316,6 +327,32 @@ class EditTests(CliTestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("nope", err)
+
+    def test_edit_splits_editor_arguments(self):
+        # `EDITOR="code -w"` is the documented form; it must not be treated as
+        # one executable path. The file to edit is the last argument, so the
+        # stand-in editor takes it from there.
+        self.seed(("x", "echo hi"))
+        editor = self.write_editor('for target; do :; done\nprintf " # touched" >> "$target"\n')
+
+        code, out, err = self.run_cli(
+            ["edit", "x"], env={"EDITOR": f"{editor} --wait"}
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(Store.open(self.path).get("x").command, "echo hi # touched")
+
+    def test_edit_missing_editor_reports_cleanly(self):
+        self.seed(("x", "echo hi"))
+
+        code, out, err = self.run_cli(
+            ["edit", "x"], env={"EDITOR": "/bin/nonexistent-editor-xyz"}
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("editor", err.lower())
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(Store.open(self.path).get("x").command, "echo hi")
 
 
 class RemoveTests(CliTestCase):

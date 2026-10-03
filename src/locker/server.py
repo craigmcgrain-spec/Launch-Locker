@@ -52,10 +52,16 @@ _ROUTES = (
     ("static", re.compile(r"/static/(?P<file>[^/]+)"), {"GET"}),
     ("api_card", re.compile(r"/api/card"), {"GET"}),
     ("create", re.compile(r"/lockers"), {"POST"}),
-    ("edit", re.compile(r"/lockers/(?P<name>.+)/edit"), {"GET"}),
-    ("delete", re.compile(r"/lockers/(?P<name>.+)/delete"), {"POST"}),
-    ("update", re.compile(r"/lockers/(?P<name>.+)"), {"POST"}),
+    # Names are matched in their percent-encoded form, so a '/' inside a name can
+    # never be mistaken for a route separator and an internal newline stays %0A.
+    # Each handler decodes the name itself. Do NOT unquote the path before
+    # matching: that turns /lockers/x%2Fdelete into the delete route for "x".
+    ("edit", re.compile(r"/lockers/(?P<name>[^/]+)/edit"), {"GET"}),
+    ("delete", re.compile(r"/lockers/(?P<name>[^/]+)/delete"), {"POST"}),
+    ("update", re.compile(r"/lockers/(?P<name>[^/]+)"), {"POST"}),
 )
+
+_PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 
 _TEMPLATES: dict[str, str] = {}
 
@@ -86,12 +92,23 @@ def _template(name: str) -> str:
     return _TEMPLATES[name]
 
 
+def _fill(template: str, values: dict[str, str]) -> str:
+    """Substitute ``{{key}}`` in a single pass over the template only.
+
+    A single pass matters. Substituting sequentially re-scans text that was
+    already inserted, so a command containing a literal ``{{hf_repo}}`` would be
+    rewritten — the store's "stored verbatim" invariant would break from the UI.
+    `re.sub` never rescans its own replacements.
+    """
+    return _PLACEHOLDER.sub(lambda match: values.get(match.group(1), match.group(0)), template)
+
+
 def _locker_row(entry: Entry) -> str:
     quoted = quote(entry.name, safe="")
     return (
         f'<tr class="locker" data-name="{escape(entry.name, quote=True)}" '
         f'data-hf="{escape(entry.hf_repo or "", quote=True)}">'
-        f'<td class="name">{escape(entry.name)}</td>'
+        f'<td class="name"><a href="/?selected={quoted}">{escape(entry.name)}</a></td>'
         f'<td class="command"><code>{escape(entry.command)}</code></td>'
         f'<td class="repo">{escape(entry.hf_repo or "")}</td>'
         f'<td class="actions">'
@@ -118,20 +135,21 @@ def render_page(entries: list[Entry], *, selected: str | None = None) -> str:
     else:
         lockers = '<p class="empty">No lockers yet. Add one below.</p>'
 
-    return (
-        _template("index.html")
-        .replace("{{lockers}}", lockers)
-        .replace("{{selected}}", escape(selected or "", quote=True))
+    return _fill(
+        _template("index.html"),
+        {"lockers": lockers, "selected": escape(selected or "", quote=True)},
     )
 
 
 def render_edit_page(entry: Entry) -> str:
-    return (
-        _template("edit.html")
-        .replace("{{name}}", escape(entry.name))
-        .replace("{{quoted}}", quote(entry.name, safe=""))
-        .replace("{{command}}", escape(entry.command))
-        .replace("{{hf_repo}}", escape(entry.hf_repo or "", quote=True))
+    return _fill(
+        _template("edit.html"),
+        {
+            "name": escape(entry.name),
+            "quoted": quote(entry.name, safe=""),
+            "command": escape(entry.command),
+            "hf_repo": escape(entry.hf_repo or "", quote=True),
+        },
     )
 
 
@@ -205,7 +223,7 @@ class LockerHandler(BaseHTTPRequestHandler):
             self._respond(403, "Cross-origin requests are refused.")
             return
 
-        path = unquote(urlparse(self.path).path)
+        path = urlparse(self.path).path  # keep percent-encoding; see _ROUTES
         for action, pattern, methods in _ROUTES:
             match = pattern.fullmatch(path)
             if match is None:
@@ -232,11 +250,13 @@ class LockerHandler(BaseHTTPRequestHandler):
     # -- routes -----------------------------------------------------------
 
     def _do_index(self, match) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        selected = (query.get("selected") or [""])[-1] or None
         entries = Store.open(self.server.store_path).entries()
-        self._send_html(200, render_page(entries))
+        self._send_html(200, render_page(entries, selected=selected))
 
     def _do_static(self, match) -> None:
-        name = match.group("file")
+        name = unquote(match.group("file"))
         if not _SAFE_STATIC.match(name):
             self._respond(404, "Not found.")
             return
@@ -281,7 +301,7 @@ class LockerHandler(BaseHTTPRequestHandler):
         self._redirect("/")
 
     def _do_edit(self, match) -> None:
-        name = match.group("name")
+        name = unquote(match.group("name"))
         try:
             entry = Store.open(self.server.store_path).resolve(name)
         except StoreError:
@@ -301,7 +321,7 @@ class LockerHandler(BaseHTTPRequestHandler):
             return
 
         hf_repo = fields.get("hf_repo", "").strip() or None
-        name = match.group("name")
+        name = unquote(match.group("name"))
         try:
             store = Store.open(self.server.store_path)
             entry = store.resolve(name)
@@ -316,7 +336,7 @@ class LockerHandler(BaseHTTPRequestHandler):
         self._redirect("/")
 
     def _do_delete(self, match) -> None:
-        name = match.group("name")
+        name = unquote(match.group("name"))
         try:
             store = Store.open(self.server.store_path)
             store.remove(store.resolve(name).name)

@@ -304,19 +304,25 @@ class Store:
         }
 
         parent = self.path.parent
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-
         tmp = parent / (self.path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-        os.replace(tmp, self.path)
-        os.chmod(self.path, 0o600)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+
+            os.replace(tmp, self.path)
+            os.chmod(self.path, 0o600)
+        except OSError as exc:
+            # An unwritable directory is a store failure like any other: the CLI
+            # must print it rather than die with a traceback, and the server must
+            # still answer the request.
+            raise StoreError(f"{self.path}: {exc}") from exc

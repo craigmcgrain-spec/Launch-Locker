@@ -463,7 +463,7 @@ Expected: FAIL — `AttributeError: module 'locker.hf' has no attribute 'CardCli
 
 - [ ] **Step 3: Implement the client**
 
-Metadata and README live together in `<cache_dir>/<owner>__<name>/meta.json` and `README.md`, written with the same temp-file-then-`os.replace` pattern as the store. The README is normalised (`\r\n` → `\n`) and truncated to `MAX_README_CHARS` **before** caching. Staleness is `now() - fetched_at > ttl_seconds`. HTTP 404 maps to `RepoNotFound`; `socket.timeout`, `URLError`, `HTTPError` with any other code, and malformed JSON all map to `CardUnavailable`. Both requests use `timeout=5` and a `User-Agent` of `Launch-Locker/<version>`. A README failure after a successful API call logs nothing and yields `readme=""`, because partial data beats no card.
+Metadata and README live together in `<cache_dir>/<owner>__<name>/meta.json` and `README.md`, written with the same temp-file-then-`os.replace` pattern as the store. The README is normalised (`\r\n` → `\n`) and truncated to `MAX_README_CHARS` **before** caching. Staleness is `now() - fetched_at > ttl_seconds`. HTTP 404 **and 401** map to `RepoNotFound`, because Hugging Face answers 401 rather than 404 both for a repo that does not exist and for a gated one (verified against the live API — an invented repo and `meta-llama/Llama-3-70B` both return 401, while `Qwen/Qwen3-8B` returns 200); treating 401 as transient tells the user to retry a request that can never succeed. `socket.timeout`, `URLError`, `HTTPError` with any other code, and malformed JSON all map to `CardUnavailable`. Both requests use `timeout=5` and a `User-Agent` of `Launch-Locker/<version>`. A README failure after a successful API call logs nothing and yields `readme=""`, because partial data beats no card.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -514,7 +514,7 @@ Start the server in a daemon thread on **port 0** (ephemeral) with a temp store,
 - `test_malformed_form_data_is_400` — `POST /lockers` with no `name`.
 - `test_non_loopback_host_is_403` — send `Host: evil.example.com:PORT`; assert 403 and that no write occurred.
 - `test_cross_origin_post_is_403` — `Origin: http://evil.example.com`; assert 403 and no write.
-- **Review Focus 1:** `test_names_with_special_characters_round_trip` — for each of `a/b`, `qwen 3.8`, `a#b`, `a%b`, `qwen-日本語` create via POST, then GET the edit page and POST an update, then delete; assert each returns 200/303 and never 404, and that the store holds the exact original name. This is the test that fails if routes split naively on `/`.
+- `test_names_with_special_characters_round_trip` — for each of `a/b`, `a/delete`, `a/edit`, `nl\nname`, `qwen 3.8`, `a#b`, `a%b`, `qwen-日本語` create via POST, then GET the edit page and POST an update, then delete; assert each returns 200/303 and never 404, and that the store holds the exact original name. **Corrected during the final review:** the original name set (`a/b`, `qwen 3.8`, `a#b`, `a%b`, `qwen-日本語`) missed every colliding case, and the routing technique originally prescribed here — unquote the path, then match with a greedy `.+` — made `POST /lockers/x%2Fdelete` match the *delete* route for `x`, silently deleting a different locker. Route on the raw path and decode the name after matching. The `a/delete`, `a/edit`, and `nl\nname` names are the ones that fail without that correction.
 - `test_names_are_html_escaped_in_the_page` — a locker named `<script>x</script>` is stored but rendered escaped, with no raw `<script>x</script>` in the body.
 - `test_commands_are_html_escaped_in_the_page` — a command containing `<b>` renders escaped.
 - `test_port_fallback_when_busy` — occupy 8765, start the server, assert it binds a higher port and reports it.
@@ -526,7 +526,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'locker.server'`
 
 - [ ] **Step 3: Implement the server**
 
-`ThreadingHTTPServer` subclassed to hold `store_path`, `refresh`, and the bound port. A `BaseHTTPRequestHandler` subclass routes with `re.fullmatch` against `urllib.parse.unquote`d paths, so `/lockers/(?P<name>.+)/edit` is matched with a greedy group **after** unquoting — never by splitting on `/`.
+`ThreadingHTTPServer` subclassed to hold `store_path`, `refresh`, and the bound port. A `BaseHTTPRequestHandler` subclass routes with `re.fullmatch` against the **raw, still percent-encoded** path and decodes the name *after* matching: `/lockers/(?P<name>[^/]+)/edit`. Do **not** unquote the path before matching, and do not use a greedy `.+` for the name — see the correction below.
 
 Order of checks in `do_GET`/`do_POST`, before any store access:
 

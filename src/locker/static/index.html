@@ -18,7 +18,7 @@
   </section>
   <aside class="card" id="card-panel" data-selected="{{selected}}">
     <h2>Model card</h2>
-    <p class="hint" id="card-hint">No model card loaded yet.</p>
+    <p class="hint">No model card loaded yet.</p>
   </aside>
 </main>
 <section class="section">
@@ -26,6 +26,7 @@
   <form method="post" action="/lockers">
     <label>name<input name="name" required autocomplete="off"></label>
     <label>command<textarea name="command" required placeholder="llama-server -hf Qwen/Qwen3-8B --port 8080"></textarea></label>
+    <p class="hint" id="repo-hint"></p>
     <label>hf repo — optional, detected from the command when blank<input name="hf_repo" autocomplete="off"></label>
     <button type="submit">save</button>
   </form>
@@ -33,7 +34,9 @@
 <script>
 (function () {
   var panel = document.getElementById('card-panel');
-  var hint = document.getElementById('card-hint');
+  // The hint lives in the form, not in the panel: loadCard replaces the panel's
+  // innerHTML, which would detach a hint element nested inside it.
+  var hint = document.getElementById('repo-hint');
   var selected = panel.dataset.selected || '';
   var rows = Array.prototype.slice.call(document.querySelectorAll('tr.locker'));
 
@@ -122,6 +125,15 @@
     });
   });
 
+  Array.prototype.forEach.call(rows, function (row) {
+    row.addEventListener('click', function (event) {
+      if (event.target.closest && event.target.closest('a, button, form')) { return; }
+      rows.forEach(function (other) { other.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadCard(row);
+    });
+  });
+
   var commandField = document.querySelector('textarea[name=command]');
   if (commandField) {
     commandField.addEventListener('input', function () {
@@ -131,6 +143,7 @@
   }
 
   var active = rows.filter(function (row) { return row.dataset.name === selected; })[0] || rows[0];
+  if (active) { active.classList.add('selected'); }
   loadCard(active);
 })();
 </script>

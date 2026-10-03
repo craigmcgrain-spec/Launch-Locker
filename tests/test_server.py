@@ -250,6 +250,60 @@ class SpecialNameTests(ServerTestCase):
         self.assertEqual(status, 200)
         self.assertIn("a/b", body)
 
+    def test_colliding_suffix_names_do_not_misroute(self):
+        """A name ending in /delete or /edit must not be read as a route."""
+        server = self.start()
+        for name in ("x", "x/delete", "x/edit"):
+            status, _, _ = self.request(
+                server, "POST", "/lockers", body={"name": name, "command": "echo hi"}
+            )
+            self.assertEqual(status, 303)
+
+        # Updating "x/delete" used to match the delete route for "x".
+        status, _, _ = self.request(
+            server,
+            "POST",
+            "/lockers/" + quote("x/delete", safe=""),
+            body={"name": "x/delete", "command": "echo edited"},
+        )
+        self.assertEqual(status, 303)
+
+        entries = {entry.name: entry.command for entry in Store.open(self.path).entries()}
+        self.assertEqual(
+            entries.get("x"), "echo hi", "the locker named 'x' must be untouched"
+        )
+        self.assertEqual(entries.get("x/edit"), "echo hi")
+        self.assertEqual(entries.get("x/delete"), "echo edited")
+
+    def test_name_with_newline_round_trips(self):
+        server = self.start()
+        name = "nl\nname"
+        quoted = quote(name, safe="")
+
+        status, _, _ = self.request(
+            server, "POST", "/lockers", body={"name": name, "command": "echo hi"}
+        )
+        self.assertEqual(status, 303)
+
+        status, body, _ = self.request(server, "GET", f"/lockers/{quoted}/edit")
+        self.assertEqual(status, 200)
+        self.assertIn("echo hi", body)
+
+        status, _, _ = self.request(server, "POST", f"/lockers/{quoted}/delete")
+        self.assertEqual(status, 303)
+        self.assertEqual(Store.open(self.path).entries(), [])
+
+    def test_selecting_a_locker_for_the_card_panel(self):
+        Store.open(self.path).add("one", "cmd1")
+        Store.open(self.path).add("two", "cmd2")
+        server = self.start()
+
+        status, body, _ = self.request(server, "GET", "/?selected=two")
+
+        self.assertEqual(status, 200)
+        self.assertIn('data-selected="two"', body)
+        self.assertIn("?selected=one", body, "each row must offer a selection link")
+
 
 class PageTests(ServerTestCase):
     def test_render_page_defaults_selection_to_the_first_locker(self):
@@ -402,6 +456,33 @@ class PanelTests(ServerTestCase):
         # The button must be wired to the clipboard, not merely present: the
         # markup existed before this task, the handler is what this task adds.
         self.assertIn("navigator.clipboard", body)
+
+    def test_repo_hint_lives_outside_the_card_panel(self):
+        # The panel's innerHTML is replaced when a card loads, which would
+        # detach a hint element nested inside it.
+        server = self.start()
+
+        status, body, _ = self.request(server, "GET", "/")
+
+        self.assertEqual(status, 200)
+        self.assertIn('id="repo-hint"', body)
+        panel = body[body.index('id="card-panel"') : body.index("</aside>")]
+        self.assertNotIn("repo-hint", panel)
+
+    def test_placeholder_like_text_in_a_command_is_never_substituted(self):
+        command = 'echo "{{selected}}" and {{hf_repo}}'
+        Store.open(self.path).add("x", command)
+        server = self.start()
+
+        status, body, _ = self.request(server, "GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("{{selected}}", body)
+        self.assertIn("{{hf_repo}}", body)
+
+        status, body, _ = self.request(server, "GET", "/lockers/x/edit")
+        self.assertEqual(status, 200)
+        self.assertIn("{{selected}}", body)
+        self.assertIn("{{hf_repo}}", body)
 
 
 if __name__ == "__main__":
