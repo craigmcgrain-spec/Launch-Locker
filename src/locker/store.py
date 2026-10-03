@@ -1,11 +1,12 @@
 """The single owner of the locker file: load, validate, and persist it.
 
 Nothing else in the package reads or writes the locker file. Commands are stored
-verbatim; this module never normalises or re-quotes them.
+verbatim; this module never normalises, re-quotes, or re-encodes them.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 from dataclasses import dataclass
@@ -17,7 +18,11 @@ SCHEMA_VERSION = 1
 
 
 class StoreError(Exception):
-    """Base class for every store failure."""
+    """Base class for every store failure.
+
+    The CLI catches this one type, so every rejection a user can provoke must
+    be a subclass: anything else escapes as a traceback.
+    """
 
 
 class StoreCorrupt(StoreError):
@@ -33,6 +38,22 @@ class ReadOnlyStore(StoreError):
     """The store file was written by a newer version of Launch Locker."""
 
 
+class InvalidName(StoreError):
+    """A locker name was empty or began with ``-``."""
+
+
+class NameConflict(StoreError):
+    """A locker with this name already exists, ignoring case."""
+
+
+class InvalidCommand(StoreError):
+    """A locker command was empty or whitespace-only."""
+
+
+class NotFound(StoreError):
+    """No locker matches the requested name."""
+
+
 @dataclass(frozen=True)
 class Entry:
     name: str
@@ -45,6 +66,20 @@ class Entry:
 def utcnow() -> str:
     """ISO 8601 UTC, seconds precision, ``Z`` suffix."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def validate_name(name: str) -> str:
+    """Return the canonical form of ``name`` or raise :class:`InvalidName`.
+
+    A leading ``-`` is rejected because argparse would read such a name as an
+    option flag, making the locker impossible to launch.
+    """
+    cleaned = name.strip()
+    if not cleaned:
+        raise InvalidName("a locker name cannot be empty")
+    if cleaned.startswith("-"):
+        raise InvalidName(f"a locker name cannot begin with '-': {cleaned!r}")
+    return cleaned
 
 
 def resolve_store_path(
@@ -153,11 +188,96 @@ class Store:
         """Entries in insertion order."""
         return list(self._entries.values())
 
+    def get(self, name: str) -> Entry:
+        """Exact-name lookup."""
+        entry = self._entries.get(name)
+        if entry is None:
+            raise NotFound(f"no locker named {name!r}")
+        return entry
+
+    def resolve(self, name: str) -> Entry:
+        """Look up by exact name first, then case-insensitively."""
+        entry = self._entries.get(name)
+        if entry is not None:
+            return entry
+
+        key = self._key_for(name)
+        if key is not None:
+            return self._entries[key]
+
+        raise NotFound(f"no locker named {name!r}")
+
+    def suggestions(self, name: str) -> list[str]:
+        """Up to three close matches, for a 'did you mean' hint."""
+        return difflib.get_close_matches(name, list(self._entries), n=3, cutoff=0.6)
+
+    def add(self, name: str, command: str, hf_repo: str | None = None) -> Entry:
+        """Create a locker. The command is stored verbatim."""
+        self._ensure_writable()
+
+        cleaned = validate_name(name)
+        existing = self._key_for(cleaned)
+        if existing is not None:
+            raise NameConflict(f"a locker named {existing!r} already exists")
+
+        if not command.strip():
+            raise InvalidCommand("a locker needs a non-empty command")
+
+        now = utcnow()
+        entry = Entry(
+            name=cleaned,
+            command=command,
+            hf_repo=hf_repo,
+            created=now,
+            updated=now,
+        )
+        self.put(entry)
+        return entry
+
+    def update(
+        self,
+        name: str,
+        command: str | None = None,
+        hf_repo: str | None = None,
+    ) -> Entry:
+        """Change an entry in place, preserving ``created``."""
+        self._ensure_writable()
+
+        current = self.resolve(name)
+        if command is not None and not command.strip():
+            raise InvalidCommand("a locker needs a non-empty command")
+
+        entry = Entry(
+            name=current.name,
+            command=current.command if command is None else command,
+            hf_repo=current.hf_repo if hf_repo is None else hf_repo,
+            created=current.created,
+            updated=utcnow(),
+        )
+        self.put(entry)
+        return entry
+
+    def remove(self, name: str) -> None:
+        """Delete a locker by name."""
+        self._ensure_writable()
+
+        entry = self.resolve(name)
+        del self._entries[entry.name]
+        self._save()
+
     def put(self, entry: Entry) -> None:
         """Store an already-built entry and persist immediately."""
         self._ensure_writable()
         self._entries[entry.name] = entry
         self._save()
+
+    def _key_for(self, name: str) -> str | None:
+        """The stored key matching ``name`` case-insensitively, if any."""
+        folded = name.casefold()
+        for existing in self._entries:
+            if existing.casefold() == folded:
+                return existing
+        return None
 
     def _ensure_writable(self) -> None:
         if self.readonly:
