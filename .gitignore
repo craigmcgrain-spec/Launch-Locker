@@ -1,0 +1,16 @@
+# SDD scratch workspace (ledger, briefs, review packages) — never commit
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Test and tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
