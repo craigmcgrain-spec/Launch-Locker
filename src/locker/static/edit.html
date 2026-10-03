@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Edit {{name}} — Launch Locker</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Edit {{name}}</h1>
+  <span class="addr"><a href="/">back to lockers</a></span>
+</header>
+<section class="section">
+  <form method="post" action="/lockers/{{quoted}}">
+    <label>name<input value="{{name}}" disabled></label>
+    <label>command<textarea name="command" required>{{command}}</textarea></label>
+    <label>hf repo — optional, detected from the command when blank<input name="hf_repo" value="{{hf_repo}}" autocomplete="off"></label>
+    <button type="submit">save</button>
+  </form>
+</section>
+</body>
+</html>

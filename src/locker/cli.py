@@ -224,12 +224,26 @@ def cmd_rm(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(store: Store, args: argparse.Namespace) -> int:
+    # Imported here so that importing the CLI pulls in neither the HTTP server
+    # nor the model-card client, keeping the launch path offline and minimal.
+    from .server import serve
+
+    return serve(
+        store.path,
+        port=args.port,
+        open_browser=not args.no_open,
+        refresh=args.refresh,
+    )
+
+
 COMMANDS = {
     "list": cmd_list,
     "launch": _run_launch,
     "add": cmd_add,
     "edit": cmd_edit,
     "rm": cmd_rm,
+    "ui": cmd_ui,
 }
 
 
