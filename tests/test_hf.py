@@ -34,6 +34,10 @@ def http_404(url: str = "https://huggingface.co/x") -> HTTPError:
     return HTTPError(url, 404, "Not Found", {}, None)
 
 
+def http_401(url: str = "https://huggingface.co/x") -> HTTPError:
+    return HTTPError(url, 401, "Unauthorized", {}, None)
+
+
 class FakeResponse:
     def __init__(self, body: bytes) -> None:
         self._body = body
@@ -217,6 +221,17 @@ class FetchTests(CardTestCase):
     def test_repo_404_raises_repo_not_found(self):
         with self.assertRaises(RepoNotFound):
             self.client(FakeOpener({})).card_for("Qwen/Qwen3-8B")
+
+    def test_repo_401_is_treated_as_not_found(self):
+        # Hugging Face answers 401, not 404, for a repo that does not exist or is
+        # gated (verified against the live API: both an invented repo and
+        # meta-llama/Llama-3-70B return 401). Reporting that as `unavailable`
+        # would tell the user to retry a request that can never succeed.
+        url = api_url("Qwen/Qwen3-8B")
+        opener = FakeOpener({url: http_401(url)})
+
+        with self.assertRaises(RepoNotFound):
+            self.client(opener).card_for("Qwen/Qwen3-8B")
 
     def test_timeout_raises_card_unavailable(self):
         opener = FakeOpener({api_url("Qwen/Qwen3-8B"): TimeoutError("timed out")})

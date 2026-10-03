@@ -6,6 +6,9 @@ build-backend = "hatchling.build"
 name = "launch-locker"
 version = "0.1.0"
 description = "Store local AI model launch commands by name and launch them from the CLI"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 
 [project.scripts]

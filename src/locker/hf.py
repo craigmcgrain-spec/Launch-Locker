@@ -220,6 +220,14 @@ class CardClient:
         except HTTPError as exc:
             if exc.code == 404:
                 raise RepoNotFound(f"Hugging Face has no repo named {url}") from exc
+            if exc.code == 401:
+                # Hugging Face answers 401 both for a repo that does not exist and
+                # for a gated one, so this means "not available to you" rather
+                # than a transient failure: retrying will never help.
+                raise RepoNotFound(
+                    f"Hugging Face has no public repo named {url} "
+                    "(it may not exist, or it may require authentication)"
+                ) from exc
             raise CardUnavailable(f"{url}: HTTP {exc.code}") from exc
         except (URLError, OSError) as exc:
             raise CardUnavailable(f"{url}: {exc}") from exc
