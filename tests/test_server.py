@@ -1,12 +1,14 @@
 """Tests for the local web UI: routes, guards, escaping, and port fallback."""
 
 import http.client
+import json
 import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote, urlencode
 
+from locker.hf import Card, CardUnavailable, RepoNotFound
 from locker.server import bind_server, host_is_loopback, make_server, render_page
 from locker.store import Store
 
@@ -267,6 +269,139 @@ class PageTests(ServerTestCase):
         self.addCleanup(server.server_close)
 
         self.assertGreater(server.server_address[1], busy)
+
+
+class StubCardClient:
+    """Stands in for CardClient so no test touches the network."""
+
+    def __init__(self, card=None, error=None):
+        self.card = card
+        self.error = error
+        self.calls = []
+
+    def card_for(self, repo):
+        self.calls.append(repo)
+        if self.error is not None:
+            raise self.error
+        return self.card, False
+
+
+def sample_card(repo="Qwen/Qwen3-8B"):
+    return Card(
+        repo=repo,
+        api={
+            "downloads": 10,
+            "likes": 2,
+            "pipeline_tag": "text-generation",
+            "lastModified": "2026-01-01T00:00:00.000Z",
+            "tags": ["license:apache-2.0", "safetensors", "text-generation"],
+        },
+        readme="# Title\n\nBody",
+        fetched_at=1000.0,
+    )
+
+
+class CardApiTests(ServerTestCase):
+    def start_with(self, client):
+        return self.start(card_client=lambda refresh=False: client)
+
+    def test_api_card_returns_metadata(self):
+        server = self.start_with(StubCardClient(card=sample_card()))
+
+        status, body, _ = self.request(server, "GET", "/api/card?repo=Qwen/Qwen3-8B")
+
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["repo"], "Qwen/Qwen3-8B")
+        self.assertEqual(data["author"], "Qwen")
+        self.assertEqual(data["downloads"], 10)
+        self.assertEqual(data["likes"], 2)
+        self.assertEqual(data["pipeline_tag"], "text-generation")
+        self.assertEqual(data["license"], "apache-2.0")
+        self.assertEqual(data["last_modified"], "2026-01-01T00:00:00.000Z")
+        self.assertIn("safetensors", data["tags"])
+        self.assertFalse(data["cached"])
+        self.assertIn("<h1>Title</h1>", data["readme_html"])
+
+    def test_api_card_404_repo_returns_error_body(self):
+        server = self.start_with(StubCardClient(error=RepoNotFound("no such repo")))
+
+        status, body, _ = self.request(server, "GET", "/api/card?repo=X/Y")
+
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["error"], "repo_not_found")
+        self.assertIn("message", data)
+
+    def test_api_card_offline_returns_unavailable(self):
+        server = self.start_with(StubCardClient(error=CardUnavailable("offline")))
+
+        status, body, _ = self.request(server, "GET", "/api/card?repo=X/Y")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["error"], "unavailable")
+
+    def test_api_card_no_candidate(self):
+        stub = StubCardClient()
+        server = self.start_with(stub)
+
+        status, body, _ = self.request(
+            server, "GET", "/api/card?command=" + quote("llama-server --port 8080")
+        )
+
+        self.assertEqual(json.loads(body)["error"], "no_candidate")
+        self.assertEqual(stub.calls, [])
+
+    def test_api_card_rejects_a_malicious_repo_parameter(self):
+        stub = StubCardClient(card=sample_card())
+        server = self.start_with(stub)
+
+        for bad in ("../../etc/passwd", "javascript:alert(1)"):
+            with self.subTest(repo=bad):
+                status, body, _ = self.request(
+                    server, "GET", "/api/card?repo=" + quote(bad, safe="")
+                )
+                self.assertEqual(json.loads(body)["error"], "no_candidate")
+
+        self.assertEqual(stub.calls, [], "a hostile repo must never be fetched")
+
+    def test_api_card_refresh_parameter_bypasses_cache(self):
+        seen = {}
+
+        def factory(refresh=False):
+            seen["refresh"] = refresh
+            return StubCardClient(card=sample_card())
+
+        server = self.start(card_client=factory)
+
+        self.request(server, "GET", "/api/card?repo=Qwen/Qwen3-8B")
+        self.assertFalse(seen["refresh"])
+
+        self.request(server, "GET", "/api/card?repo=Qwen/Qwen3-8B&refresh=1")
+        self.assertTrue(seen["refresh"])
+
+
+class PanelTests(ServerTestCase):
+    def test_index_includes_card_panel_and_script(self):
+        server = self.start()
+
+        status, body, _ = self.request(server, "GET", "/")
+
+        self.assertEqual(status, 200)
+        self.assertIn('id="card-panel"', body)
+        self.assertIn("/api/card", body)
+
+    def test_index_includes_copy_button(self):
+        Store.open(self.path).add("x", "echo hi")
+        server = self.start()
+
+        status, body, _ = self.request(server, "GET", "/")
+
+        self.assertEqual(status, 200)
+        self.assertIn('class="copy"', body)
+        # The button must be wired to the clipboard, not merely present: the
+        # markup existed before this task, the handler is what this task adds.
+        self.assertIn("navigator.clipboard", body)
 
 
 if __name__ == "__main__":

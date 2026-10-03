@@ -14,6 +14,7 @@ can POST to http://127.0.0.1:<port>/:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
@@ -24,6 +25,17 @@ from importlib.resources import files as _resource_files
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from .hf import (
+    Card,
+    CardClient,
+    CardUnavailable,
+    NoCandidateDetected,
+    RepoNotFound,
+    cache_dir_for,
+    is_repo_id,
+    lookup,
+)
+from .md import render
 from .store import Entry, NameConflict, NotFound, Store, StoreError
 
 _HOSTS = ("127.0.0.1", "localhost")
@@ -38,6 +50,7 @@ _CONTENT_TYPES = {
 _ROUTES = (
     ("index", re.compile(r"/"), {"GET"}),
     ("static", re.compile(r"/static/(?P<file>[^/]+)"), {"GET"}),
+    ("api_card", re.compile(r"/api/card"), {"GET"}),
     ("create", re.compile(r"/lockers"), {"POST"}),
     ("edit", re.compile(r"/lockers/(?P<name>.+)/edit"), {"GET"}),
     ("delete", re.compile(r"/lockers/(?P<name>.+)/delete"), {"POST"}),
@@ -76,7 +89,8 @@ def _template(name: str) -> str:
 def _locker_row(entry: Entry) -> str:
     quoted = quote(entry.name, safe="")
     return (
-        f'<tr class="locker" data-name="{escape(entry.name, quote=True)}">'
+        f'<tr class="locker" data-name="{escape(entry.name, quote=True)}" '
+        f'data-hf="{escape(entry.hf_repo or "", quote=True)}">'
         f'<td class="name">{escape(entry.name)}</td>'
         f'<td class="command"><code>{escape(entry.command)}</code></td>'
         f'<td class="repo">{escape(entry.hf_repo or "")}</td>'
@@ -121,14 +135,49 @@ def render_edit_page(entry: Entry) -> str:
     )
 
 
+def _summarize(card: Card, from_cache: bool) -> dict:
+    """Shape a Card for the panel, deriving what the card view needs."""
+    api = card.api
+    tags = [tag for tag in (api.get("tags") or []) if isinstance(tag, str)]
+    license_name = next(
+        (tag.split(":", 1)[1] for tag in tags if tag.startswith("license:")), None
+    )
+    downloads = api.get("downloads")
+    likes = api.get("likes")
+
+    return {
+        "repo": card.repo,
+        "author": card.repo.split("/", 1)[0],
+        "pipeline_tag": api.get("pipeline_tag"),
+        "downloads": downloads if isinstance(downloads, int) else 0,
+        "likes": likes if isinstance(likes, int) else 0,
+        "license": license_name,
+        "last_modified": api.get("lastModified"),
+        "tags": tags[:20],
+        "cached": from_cache,
+        "readme_html": render(card.readme),
+    }
+
+
 class LockerHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, *, store_path: Path, refresh: bool = False):
+    def __init__(
+        self,
+        address,
+        handler,
+        *,
+        store_path: Path,
+        refresh: bool = False,
+        card_client=None,
+    ):
         super().__init__(address, handler)
         self.store_path = Path(store_path)
         self.refresh = refresh
+        # None means "build a real CardClient per request"; tests inject a
+        # factory so no test ever reaches the network.
+        self.card_client = card_client
 
 
 class LockerHandler(BaseHTTPRequestHandler):
@@ -277,6 +326,61 @@ class LockerHandler(BaseHTTPRequestHandler):
 
         self._redirect("/")
 
+    def _do_api_card(self, match) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        repo = (query.get("repo") or [""])[-1].strip()
+        command = (query.get("command") or [""])[-1]
+        refresh = bool(query.get("refresh")) or self.server.refresh
+
+        if repo and not is_repo_id(repo):
+            # Validated before any client is built, so a hostile value can never
+            # reach the network layer.
+            self._send_json(
+                200,
+                {
+                    "error": "no_candidate",
+                    "message": "That is not a Hugging Face repo id.",
+                    "repo": None,
+                },
+            )
+            return
+
+        client = self._card_client(refresh)
+
+        try:
+            card, from_cache = lookup(command, repo or None, client)
+        except NoCandidateDetected:
+            self._send_json(
+                200,
+                {
+                    "error": "no_candidate",
+                    "message": "No Hugging Face repo detected in this command.",
+                    "repo": None,
+                },
+            )
+        except RepoNotFound as exc:
+            self._send_json(
+                200,
+                {"error": "repo_not_found", "message": str(exc), "repo": repo or None},
+            )
+        except CardUnavailable as exc:
+            self._send_json(
+                200,
+                {
+                    "error": "unavailable",
+                    "message": f"Model card unavailable ({exc}).",
+                    "repo": repo or None,
+                },
+            )
+        else:
+            self._send_json(200, _summarize(card, from_cache))
+
+    def _card_client(self, refresh: bool) -> CardClient:
+        injected = self.server.card_client
+        if injected is None:
+            return CardClient(cache_dir_for(), refresh=refresh)
+        return injected(refresh=refresh)
+
     # -- helpers ----------------------------------------------------------
 
     def _read_form(self) -> dict | None:
@@ -307,6 +411,15 @@ class LockerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _respond(self, status: int, message: str) -> None:
         self._send_html(
             status,
@@ -321,9 +434,14 @@ def make_server(
     host: str = "127.0.0.1",
     port: int = 8765,
     refresh: bool = False,
+    card_client=None,
 ) -> LockerHTTPServer:
     return LockerHTTPServer(
-        (host, port), LockerHandler, store_path=store_path, refresh=refresh
+        (host, port),
+        LockerHandler,
+        store_path=store_path,
+        refresh=refresh,
+        card_client=card_client,
     )
 
 
