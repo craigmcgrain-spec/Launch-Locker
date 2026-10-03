@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
 from typing import Callable, NoReturn
 
 from .store import Entry, NotFound, Store, StoreError, resolve_store_path
@@ -29,7 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="locker file to use (default: $LOCKER_FILE, then the XDG config dir)",
     )
 
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    # dest must not be "command": -c/--command on the add/edit subparsers would
+    # otherwise overwrite the subcommand name in the namespace, and argparse
+    # applies that option's default even when the flag is absent, silently
+    # turning `locker edit x` into `locker list`.
+    sub = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
 
     p_launch = sub.add_parser("launch", help="run a stored command in the foreground")
     p_launch.add_argument("name", help="name of the locker to launch")
@@ -150,9 +156,80 @@ def _run_launch(store: Store, args: argparse.Namespace) -> int:
     return cmd_launch(store, args.name)
 
 
+def read_command_from_stdin() -> str:
+    """Read a command from stdin, stripping only the outer whitespace.
+
+    Internal newlines are preserved: multi-line launch commands are normal.
+    """
+    return sys.stdin.read().strip()
+
+
+def cmd_add(store: Store, args: argparse.Namespace) -> int:
+    command = args.command if args.command is not None else read_command_from_stdin()
+
+    entry = store.add(args.name, command, hf_repo=args.hf_repo)
+    print(f"stored {entry.name!r}")
+    return 0
+
+
+def _edit_in_editor(current: str) -> str:
+    """Open the command in ``$EDITOR`` and return what was saved.
+
+    ``subprocess`` is used here for the editor only. It never executes a stored
+    command, so the rule that only ``cmd_launch`` executes anything still holds.
+    """
+    editor = os.environ.get("EDITOR") or "vi"
+
+    fd, path = tempfile.mkstemp(prefix="locker-", suffix=".cmd")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(current)
+        subprocess.call([editor, path])
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def cmd_edit(store: Store, args: argparse.Namespace) -> int:
+    entry = store.resolve(args.name)
+
+    command = args.command
+    if command is None and args.hf_repo is None:
+        command = _edit_in_editor(entry.command)
+
+    # No change means no write: an untouched editor must not churn `updated` or
+    # rewrite the file.
+    if command == entry.command and args.hf_repo is None:
+        print(f"unchanged {entry.name!r}")
+        return 0
+
+    updated = store.update(args.name, command=command, hf_repo=args.hf_repo)
+    print(f"updated {updated.name!r}")
+    return 0
+
+
+def cmd_rm(store: Store, args: argparse.Namespace) -> int:
+    if not args.yes:
+        print(f"Remove {args.name!r}? [y/N] ", end="")
+        if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+            print("cancelled")
+            return 0
+
+    store.remove(args.name)
+    print(f"removed {args.name!r}")
+    return 0
+
+
 COMMANDS = {
     "list": cmd_list,
     "launch": _run_launch,
+    "add": cmd_add,
+    "edit": cmd_edit,
+    "rm": cmd_rm,
 }
 
 
@@ -165,12 +242,12 @@ def main(argv: list[str] | None = None) -> int:
         # argparse exits for --help and for usage errors; turn both into a code.
         return exc.code if isinstance(exc.code, int) else 2
 
-    if args.command is None:
-        args.command = "list"
+    if args.subcommand is None:
+        args.subcommand = "list"
 
-    handler = COMMANDS.get(args.command)
+    handler = COMMANDS.get(args.subcommand)
     if handler is None:
-        parser.error(f"unknown command: {args.command}")
+        parser.error(f"unknown command: {args.subcommand}")
 
     try:
         store = Store.open(resolve_store_path(args.file))
